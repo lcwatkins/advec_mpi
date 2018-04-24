@@ -11,7 +11,7 @@
 typedef std::vector<std::vector<double> > dmatrix ;
 
 void init(int N, double dx, dmatrix& C);
-void init_mpi(int N, double dx, dmatrix& C, int nprocs, int* coords);
+void init_mpi(int N, double dx, dmatrix& C, int subgridlen, int* coords);
 void printMat(int N, dmatrix& C);
 void copyAtoB(dmatrix& A, dmatrix& B);
 void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v);
@@ -82,8 +82,8 @@ int main(int argc, char *argv[]){
     // initialize matrix portion on each proc
     dmatrix my_C;
     dmatrix my_C_old;
-    init_mpi(N, dx, my_C, ngrid, coords);
-    init_mpi(N, dx, my_C_old, ngrid, coords);
+    init_mpi(N, dx, my_C, subgridlen, coords);
+    //init_mpi(N, dx, my_C_old, nprocs, coords);
 
     printToFile_mpi(my_C, N, subgridlen, ngrid, mype);
 
@@ -149,21 +149,22 @@ void init(int N, double dx, dmatrix& C){
     }
 }
 
-void init_mpi(int N, double dx, dmatrix& C, int subgridlen, int* coords){
+void init_mpi(int N, double dx, dmatrix& C, int nl, int* coords){
+    // nl == length of each procs grid
     int xa,ya;
     double x0, y0, sigx2, sigy2;
     double x,y;
-    xa = subgridlen*coords[0];
-    ya = subgridlen*coords[1];
+    xa = (nl)*coords[0];
+    ya = (nl)*coords[1];
     printf("x,y: (%d,%d)\n", xa, ya);
-    C.resize(N, std::vector<double>(N));
+    C.resize(nl, std::vector<double>(nl));
     x0 = dx*N/2;
     y0 = x0;
     sigx2 = 0.25*0.25;
     sigy2 = 0.25*0.25;
-    for (int i=0; i<N; i++){
+    for (int i=0; i<nl; i++){
         x = (dx*(xa+i+0.5))-x0;
-        for (int j=0; j<N; j++){
+        for (int j=0; j<nl; j++){
             y = (dx*(ya+j+0.5))-y0;
             C[i][j] = exp(-(x*x/(2*sigx2) + y*y/(2*sigy2)));
         }
