@@ -36,7 +36,7 @@ int main(int argc, char *argv[]){
         u = std::stof(argv[5]);
         v = std::stof(argv[6]);
     } else {
-        N = 8;
+        N = 16;
         NT = 20000.0;
         L = 1.0;
        T = 1.0e6;
@@ -80,6 +80,8 @@ int main(int argc, char *argv[]){
     stat = MPI_Cart_coords(cartcomm, mype, ndim, coords);
     
     // initialize matrix portion on each proc
+    // ghost cells included in C, so C is size subgridlen+2 
+    // cells "owned" by C are in the interior
     dmatrix my_C;
     dmatrix my_C_old;
     init_mpi(N, dx, my_C, subgridlen, coords);
@@ -151,13 +153,14 @@ void init(int N, double dx, dmatrix& C){
 
 void init_mpi(int N, double dx, dmatrix& C, int nl, int* coords){
     // nl == length of each procs grid
+    // make C nl+2 x nl+2 for ghost cells on all 4 sides, so shift
+    // C entries to (1,nl+1)
     int xa,ya;
     double x0, y0, sigx2, sigy2;
     double x,y;
     xa = (nl)*coords[0];
     ya = (nl)*coords[1];
-    printf("x,y: (%d,%d)\n", xa, ya);
-    C.resize(nl, std::vector<double>(nl));
+    C.resize(nl+2, std::vector<double>(nl+2));
     x0 = dx*N/2;
     y0 = x0;
     sigx2 = 0.25*0.25;
@@ -166,7 +169,7 @@ void init_mpi(int N, double dx, dmatrix& C, int nl, int* coords){
         x = (dx*(xa+i+0.5))-x0;
         for (int j=0; j<nl; j++){
             y = (dx*(ya+j+0.5))-y0;
-            C[i][j] = exp(-(x*x/(2*sigx2) + y*y/(2*sigy2)));
+            C[i+1][j+1] = exp(-(x*x/(2*sigx2) + y*y/(2*sigy2)));
         }
     }
 }
@@ -229,19 +232,18 @@ void printToFile_mpi(dmatrix& C, int N, int subgridlen, int ngrid, int myrank){
         file = fopen(outname, "w");
 
         int startp, endp, stat;
-        // loop over all N rows
+        // loop over all N rows (row == row# of whole C matrix)
         // startp is the first proc containing data in that row
+        // NOTE: ghost cells included in C, so add 1 to indices
         for (int row=0; row<N; row++){
             startp = (row/subgridlen)*ngrid;
             endp = startp + ngrid;
 
-            printf("row%d  start: %d, end: %d\n",row,startp,endp);
-      
             // if startp = 0, print row before receiving from other procs
             // add 1 to startp then? maybe change to send to self also?
             if (startp==myrank){
-                for (int j=0; j<subgridlen; j++){
-                    fprintf(file, " %f ", C[row][j]);
+                for (int j=1; j<subgridlen+1; j++){
+                    fprintf(file, "%f ", C[row+1][j]);
                 }
                 startp += 1;
             }
@@ -251,7 +253,7 @@ void printToFile_mpi(dmatrix& C, int N, int subgridlen, int ngrid, int myrank){
                 stat = MPI_Recv(&recvbuf, subgridlen, MPI_DOUBLE, i, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
                 assert(stat == MPI_SUCCESS);
                 for (int j=0; j<subgridlen; j++){
-                    fprintf(file, " %f ", recvbuf[j]);
+                    fprintf(file, "%f ", recvbuf[j]);
                 }
             }
             fprintf(file, "\n");
@@ -260,7 +262,7 @@ void printToFile_mpi(dmatrix& C, int N, int subgridlen, int ngrid, int myrank){
     } else {
         // have each other proc send its array one row at a time
         for (int row=0; row<subgridlen; row++){
-            MPI_Send(&C[row][0], subgridlen, MPI_DOUBLE, 0, 99, MPI_COMM_WORLD);
+            MPI_Send(&C[row+1][1], subgridlen, MPI_DOUBLE, 0, 99, MPI_COMM_WORLD);
         }
     }
     return;
