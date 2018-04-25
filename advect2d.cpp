@@ -12,11 +12,12 @@ typedef std::vector<std::vector<double> > dmatrix ;
 
 void init(int N, double dx, dmatrix& C);
 void init_mpi(int N, double dx, dmatrix& C, int subgridlen, int* coords);
+void exchangeGhostCells(dmatrix& my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype);
 void printMat(int N, dmatrix& C);
 void copyAtoB(dmatrix& A, dmatrix& B);
 void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v);
 void printToFile(int N, int step, dmatrix& A);
-void printToFile_mpi(dmatrix& C, int N, int subgridlen, int ngrid, int myrank);
+void printToFile_mpi(int step, dmatrix& C, int N, int subgridlen, int ngrid, int myrank);
 
 int main(int argc, char *argv[]){
     int rflag;
@@ -43,7 +44,7 @@ int main(int argc, char *argv[]){
         u = 5.0e-7;
         v = 2.85e-7;
     }
-    printf("N: %d \nNT: %f \nL: %f \nT: %f \nu: %f \nv: %f \n", N, NT, L, T, u, v);
+    //printf("N: %d \nNT: %f \nL: %f \nT: %f \nu: %f \nv: %f \n", N, NT, L, T, u, v);
     dx = L/N;
     dt = T/NT;
     h = dx/sqrt(2*(u*u+v*v));
@@ -78,6 +79,7 @@ int main(int argc, char *argv[]){
     // get coords of the subgrid on each proc
     int coords[ndim] ;
     stat = MPI_Cart_coords(cartcomm, mype, ndim, coords);
+    printf("%d: (%d,%d)\n",mype,coords[0],coords[1]);
     
     // initialize matrix portion on each proc
     // ghost cells included in C, so C is size subgridlen+2 
@@ -85,11 +87,21 @@ int main(int argc, char *argv[]){
     dmatrix my_C;
     dmatrix my_C_old;
     init_mpi(N, dx, my_C, subgridlen, coords);
-    //init_mpi(N, dx, my_C_old, nprocs, coords);
+    //init_mpi(N, dx, my_C_old, subgridlen, coords);
 
-    printToFile_mpi(my_C, N, subgridlen, ngrid, mype);
+    printToFile(subgridlen+2, mype, my_C);
+ //   printToFile_mpi(0, my_C, N, subgridlen, ngrid, mype);
 
-    // get initial matrices
+    // get neighbors: nbrs: (up,down,left,right)
+    int nbrs[4];
+    stat = MPI_Cart_shift(cartcomm, 0, 1, &nbrs[0], &nbrs[1]);
+    stat = MPI_Cart_shift(cartcomm, 1, 1, &nbrs[2], &nbrs[3]);
+   // printf("proc %d, up: %d, down: %d, left: %d, right: %d\n",mype, nbrs[0], nbrs[1], nbrs[2], nbrs[3]);
+
+    exchangeGhostCells(my_C, subgridlen, cartcomm, nbrs, coords, mype);
+
+    printToFile(subgridlen+2, mype, my_C);
+
    
    /* 
     NT = 10;
@@ -104,6 +116,76 @@ int main(int argc, char *argv[]){
     */
     MPI_Finalize();
     return 0;
+}
+
+void exchangeGhostCells(dmatrix& my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype){
+    int stat;
+    MPI_Status status;
+    MPI_Datatype mpi_column;
+    MPI_Type_vector(subgridlen+2, 1, subgridlen+4, MPI_DOUBLE, &mpi_column);
+    MPI_Type_commit(&mpi_column);
+
+    // mpi tags:    23 == left->right
+    //              32 == right->left
+    //              01 == up->down
+    //              10 == down->up
+    if (coords[1] == 0) {
+        // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
+        MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
+        //printf("%d waiting for %d\n",mype,nbrs[2]);
+        MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
+        assert(stat == MPI_SUCCESS);
+        //printf("%d received from %d\n",mype,nbrs[2]);
+
+        // SEND LEFT SIDE TO LEFT NEGIHBOR 
+        MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
+        //printf("%d waiting for %d\n",mype,nbrs[3]);
+        MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
+        assert(stat == MPI_SUCCESS);
+        //printf("%d received from %d\n",mype,nbrs[3]);
+    } else {
+        // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
+        //printf("%d waiting for %d\n",mype,nbrs[2]);
+        MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
+        assert(stat == MPI_SUCCESS);
+        //printf("%d received from %d\n",mype,nbrs[2]);
+        MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
+
+        // SEND LEFT SIDE TO LEFT NEGIHBOR 
+        //printf("%d waiting for %d\n",mype,nbrs[3]);
+        MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
+        assert(stat == MPI_SUCCESS);
+        //printf("%d received from %d\n",mype,nbrs[3]);
+        MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
+    }
+    if (coords[0] == 0){
+        // SEND TOP TO ABOVE NEIGHBOR
+        MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
+        //printf("%d waiting for %d\n",mype,nbrs[1]);
+        MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
+        assert(stat == MPI_SUCCESS);
+        //printf("%d received from %d\n",mype,nbrs[1]);
+
+        // SEND BOTTOM TO BELOW NEIGHBOR
+        MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
+        //printf("%d waiting for %d\n",mype,nbrs[0]);
+        MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
+        assert(stat == MPI_SUCCESS);
+        //printf("%d received from %d\n",mype,nbrs[0]);
+    } else {
+        //printf("%d waiting for %d\n",mype,nbrs[1]);
+        MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
+        assert(stat == MPI_SUCCESS);
+        //printf("%d received from %d\n",mype,nbrs[1]);
+        MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
+
+        //printf("%d waiting for %d\n",mype,nbrs[0]);
+        MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
+        assert(stat == MPI_SUCCESS);
+        //printf("%d received from %d\n",mype,nbrs[1]);
+        MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
+    }
+    return;
 }
 
 void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v){
@@ -151,25 +233,26 @@ void init(int N, double dx, dmatrix& C){
     }
 }
 
-void init_mpi(int N, double dx, dmatrix& C, int nl, int* coords){
-    // nl == length of each procs grid
-    // make C nl+2 x nl+2 for ghost cells on all 4 sides, so shift
-    // C entries to (1,nl+1)
+void init_mpi(int N, double dx, dmatrix& C, int sgl, int* coords){
+    // sgl == length of each procs grid
+    // make C sgl+2 x sgl+2 for ghost cells on all 4 sides, so shift
+    // C entries to (1,sgl+1)
     int xa,ya;
     double x0, y0, sigx2, sigy2;
     double x,y;
-    xa = (nl)*coords[0];
-    ya = (nl)*coords[1];
-    C.resize(nl+2, std::vector<double>(nl+2));
+    xa = (sgl)*coords[0];
+    ya = (sgl)*coords[1];
+    C.resize((sgl+2), std::vector<double>((sgl+2)));
     x0 = dx*N/2;
     y0 = x0;
     sigx2 = 0.25*0.25;
     sigy2 = 0.25*0.25;
-    for (int i=0; i<nl; i++){
+    for (int i=0; i<sgl; i++){
         x = (dx*(xa+i+0.5))-x0;
-        for (int j=0; j<nl; j++){
+        for (int j=0; j<sgl; j++){
             y = (dx*(ya+j+0.5))-y0;
-            C[i+1][j+1] = exp(-(x*x/(2*sigx2) + y*y/(2*sigy2)));
+            //C[i+1][j+1] = exp(-(x*x/(2*sigx2) + y*y/(2*sigy2)));
+            C[i+1][j+1] = (i+1)*(-1*j+1);
         }
     }
 }
@@ -210,25 +293,14 @@ void printToFile(int N, int step, dmatrix& A){
     return;
 }
 
-void printToFile_mpi(dmatrix& C, int N, int subgridlen, int ngrid, int myrank){
+void printToFile_mpi(int step, dmatrix& C, int N, int subgridlen, int ngrid, int myrank){
+    // proc 0 is "master" to collect and print all info
     if (myrank == 0){
-      //  printf("N: %d, ngrid: %d,  subgridlen: %d\n",N,ngrid,subgridlen);
-      //  for (int row=0; row<N; row++){
-      //      printf("row%d",row);
-      //      int p = (row/subgridlen)*ngrid;
-      //      for (int pinrow=p; pinrow<(p+ngrid); pinrow++){
-      //          for (int k=0; k<subgridlen; k++){
-      //              printf(" p%d", pinrow);
-      //          }
-      //      }
-      //      printf("\n");
-      //  }
-
         MPI_Status status;
         double recvbuf[subgridlen];
         FILE* file;
         char outname [40];
-        int n = sprintf(outname, "out-advec-init.dat");
+        int n = sprintf(outname, "out-advec-%d.dat", step);
         file = fopen(outname, "w");
 
         int startp, endp, stat;
