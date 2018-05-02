@@ -25,7 +25,7 @@ int main(int argc, char *argv[]){
     int rflag;
     rflag = 1;
     // parameters: read in
-    double NT, T, L, u, v, dx, dt, h;
+    double NT, T, L, u, v, dx, dt, h, c0, c1, localtime, globaltime;
     int N, nthreads, blockflag;
     std::string mpimode;
     if (rflag == 1){
@@ -71,14 +71,11 @@ int main(int argc, char *argv[]){
     assert(stat == MPI_SUCCESS);
     assert(fmod(N, sqrt(nprocs)) == 0);
 
-    if (mype==0){
-        printf("N: %d \nNT: %f \nL: %f \nT: %f \nu: %f \nv: %f \n", N, NT, L, T, u, v);
-    }
-
     if (mpimode.compare("mpi_non_blocking") == 0) {
         blockflag = 0;
         if (mype == 0){
-            printf("MPI non-blocking mode\n");
+ //           printf("MPI non-blocking mode\n");
+            printf("non-blocking ");           
             if (nthreads != 1) {
                 printf("Note: reseting to 1 OMP thread\n");
             }
@@ -87,7 +84,8 @@ int main(int argc, char *argv[]){
     } else if (mpimode.compare("mpi_blocking") == 0){
         blockflag = 1;
         if (mype == 0){
-            printf("MPI blocking mode\n");
+ //           printf("MPI blocking mode\n");
+            printf("blocking     ");           
             if (nthreads != 1) {
                 printf("Note: reseting to 1 OMP thread\n");
             }
@@ -96,7 +94,8 @@ int main(int argc, char *argv[]){
     } else if (mpimode.compare("hybrid") == 0) {
         blockflag = 0;
         if (mype == 0){
-            printf("hybrid mode with %d mpi ranks and %d threads per rank (non-blocking MPI) \n",nprocs, nthreads);
+ //           printf("hybrid mode with %d mpi ranks and %d threads per rank (non-blocking MPI) \n",nprocs, nthreads);
+            printf("hybrid       ");           
             if (nthreads == 1) {
                 printf("Note: only 1 OMP thread\n");
             }
@@ -104,6 +103,11 @@ int main(int argc, char *argv[]){
     } else {
         printf("non valid MPI mode\n");
         return 1;
+    }
+
+    if (mype==0){
+ //       printf("N: %d \nNT: %f \nL: %f \nT: %f \nu: %f \nv: %f \n", N, NT, L, T, u, v);
+        printf("%d  %d  ", nprocs, nthreads); 
     }
 
     // setup cartesian communicator 
@@ -132,14 +136,12 @@ int main(int argc, char *argv[]){
     init_mpi(N, dx, my_C, subgridlen, coords, nthreads);
     init_mpi(N, dx, my_C_old, subgridlen, coords, nthreads);
 
-    printToFile(subgridlen+2, mype, my_C);
-    printToFile_mpi(100, my_C, N, subgridlen, ngrid, mype);
-
     // get neighbors: nbrs: (up,down,left,right)
     int nbrs[4];
     stat = MPI_Cart_shift(cartcomm, 0, 1, &nbrs[0], &nbrs[1]);
     stat = MPI_Cart_shift(cartcomm, 1, 1, &nbrs[2], &nbrs[3]);
 
+    c0 = omp_get_wtime();
     // run for NT timesteps
     for (int step=0;step<NT;step++){
         exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
@@ -147,9 +149,14 @@ int main(int argc, char *argv[]){
     //    if (step%10 == 0){
     //        printToFile_mpi(step, my_C, N, subgridlen, ngrid, mype);
     //    }
-    }
         std::swap(my_C,my_C_old);
-    printToFile_mpi(110, my_C_old, N, subgridlen, ngrid, mype);
+    }
+    c1 = omp_get_wtime();
+    localtime = c1-c0;
+    MPI_Reduce(&localtime, &globaltime, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    if (mype==0) {
+        printf(" %f\n", globaltime/nprocs);
+    }
     MPI_Finalize();
     return 0;
 }
