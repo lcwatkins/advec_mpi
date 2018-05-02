@@ -139,17 +139,17 @@ int main(int argc, char *argv[]){
     stat = MPI_Cart_shift(cartcomm, 1, 1, &nbrs[2], &nbrs[3]);
    // printf("proc %d, up: %d, down: %d, left: %d, right: %d\n",mype, nbrs[0], nbrs[1], nbrs[2], nbrs[3]);
 
-    NT = 1;
+    NT = 10;
     // run for NT timesteps
     for (int step=0;step<NT;step++){
         exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
         update_mpi(my_C, my_C_old, subgridlen, h, u, v, nthreads);
-        copyAtoB(my_C,my_C_old);
     //    if (step%10 == 0){
     //        printToFile_mpi(step, my_C, N, subgridlen, ngrid, mype);
     //    }
     }
-    printToFile_mpi(101, my_C, N, subgridlen, ngrid, mype);
+        std::swap(my_C,my_C_old);
+    printToFile_mpi(110, my_C_old, N, subgridlen, ngrid, mype);
     MPI_Finalize();
     return 0;
 }
