@@ -51,16 +51,15 @@ int main(int argc, char *argv[]){
         nthreads = 1;
         mpimode = "mpi_non_blocking";
     }
-    //printf("N: %d \nNT: %f \nL: %f \nT: %f \nu: %f \nv: %f \n", N, NT, L, T, u, v);
+
     dx = L/N;
     dt = T/NT;
     h = dx/sqrt(2*(u*u+v*v));
     if (dt>h){
         printf("UNSTABLE! h: %f \ndt: %f\n",h,dt);
+        return 1;
     }
     h = dt/(2*dx);
-
-    printf("N: %d, dx: %f\n", N, dx);
 
     // SETUP MPI STUFF
 
@@ -71,6 +70,10 @@ int main(int argc, char *argv[]){
     stat = MPI_Comm_rank(MPI_COMM_WORLD, &mype);
     assert(stat == MPI_SUCCESS);
     assert(fmod(N, sqrt(nprocs)) == 0);
+
+    if (mype==0){
+        printf("N: %d \nNT: %f \nL: %f \nT: %f \nu: %f \nv: %f \n", N, NT, L, T, u, v);
+    }
 
     if (mpimode.compare("mpi_non_blocking") == 0) {
         blockflag = 0;
@@ -120,7 +123,6 @@ int main(int argc, char *argv[]){
     // get coords of the subgrid on each proc
     int coords[ndim] ;
     stat = MPI_Cart_coords(cartcomm, mype, ndim, coords);
-    printf("%d: (%d,%d)\n",mype,coords[0],coords[1]);
     
     // initialize matrix portion on each proc
     // ghost cells included in C, so C is size subgridlen+2 
@@ -137,9 +139,7 @@ int main(int argc, char *argv[]){
     int nbrs[4];
     stat = MPI_Cart_shift(cartcomm, 0, 1, &nbrs[0], &nbrs[1]);
     stat = MPI_Cart_shift(cartcomm, 1, 1, &nbrs[2], &nbrs[3]);
-   // printf("proc %d, up: %d, down: %d, left: %d, right: %d\n",mype, nbrs[0], nbrs[1], nbrs[2], nbrs[3]);
 
-    NT = 10;
     // run for NT timesteps
     for (int step=0;step<NT;step++){
         exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
@@ -167,67 +167,49 @@ void exchangeGhostCells(dmatrix& my_C, int subgridlen, MPI_Comm cartcomm, int* n
     //              10 == down->up
 
     if (blockflag == 1) {
-        printf("BLOCK\n");
         // blocking send/recv
         if (coords[1] == 0) {
             // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
             MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
-            //printf("%d waiting for %d\n",mype,nbrs[2]);
             MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[2]);
 
             // SEND LEFT SIDE TO LEFT NEGIHBOR 
             MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
-            //printf("%d waiting for %d\n",mype,nbrs[3]);
             MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[3]);
         } else {
             // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
-            //printf("%d waiting for %d\n",mype,nbrs[2]);
             MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[2]);
             MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
 
             // SEND LEFT SIDE TO LEFT NEGIHBOR 
-            //printf("%d waiting for %d\n",mype,nbrs[3]);
             MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[3]);
             MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
         }
         if (coords[0] == 0){
             // SEND TOP TO ABOVE NEIGHBOR
             MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
-            //printf("%d waiting for %d\n",mype,nbrs[1]);
             MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[1]);
 
             // SEND BOTTOM TO BELOW NEIGHBOR
             MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
-            //printf("%d waiting for %d\n",mype,nbrs[0]);
             MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[0]);
         } else {
-            //printf("%d waiting for %d\n",mype,nbrs[1]);
             MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[1]);
             MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
 
-            //printf("%d waiting for %d\n",mype,nbrs[0]);
             MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[1]);
             MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
         }
     } else {
         // non-blocking send/recv
-        printf("NONBLOCK\n");
         MPI_Status status[4*2];
         MPI_Request reqs[4*2];
         MPI_Irecv(&(my_C[0][0]),1,mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &reqs[0]);
@@ -277,18 +259,19 @@ void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v){
 // just go from 1 to n instead
 void update_mpi(dmatrix& C, dmatrix& C_old, int n, double h, double u, double v, int nthreads){
     double temp;
+    int i,j;
     if (nthreads > 1) {
 #pragma omp parallel for num_threads(nthreads) private(i,j,temp) shared(n,C,C_old) schedule(static)
-        for (int i=1;i<=n;i++){
-            for (int j=1;j<=n;j++){
+        for (i=1;i<=n;i++){
+            for (j=1;j<=n;j++){
                 temp = 0.25*(C_old[i-1][j] + C_old[i+1][j] + C_old[i][j-1] + C_old[i][j+1]);
                 C[i][j] = temp - h*(u*(C_old[i+1][j]-C_old[i-1][j]) + v*(C_old[i][j+1] - C_old[i][j-1]));
             }
         }
 
     } else {
-        for (int i=1;i<=n;i++){
-            for (int j=1;j<=n;j++){
+        for (i=1;i<=n;i++){
+            for (j=1;j<=n;j++){
                 temp = 0.25*(C_old[i-1][j] + C_old[i+1][j] + C_old[i][j-1] + C_old[i][j+1]);
                 C[i][j] = temp - h*(u*(C_old[i+1][j]-C_old[i-1][j]) + v*(C_old[i][j+1] - C_old[i][j-1]));
             }
@@ -319,7 +302,7 @@ void init_mpi(int N, double dx, dmatrix& C, int sgl, int* coords, int nthreads){
     // sgl == length of each procs grid
     // make C sgl+2 x sgl+2 for ghost cells on all 4 sides, so shift
     // C entries to (1,sgl+1)
-    int xa,ya;
+    int xa,ya,i,j;
     double x0, y0, sigx2, sigy2;
     double x,y;
     xa = (sgl)*coords[0];
