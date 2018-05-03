@@ -12,10 +12,10 @@
 typedef std::vector<std::vector<double> > dmatrix ;
 
 double **alloc2darray(int size);
-void init_mpi(int N, double dx, double **C, int subgridlen, int* coords);
+void init_mpi(int N, double dx, double **C, int subgridlen, int* coords, int nthreads);
 void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype, int blockflag);
 void update(double **C, double **C_old, int N, double h, double u, double v);
-void update_mpi(double **C, double **C_old, int n, double h, double u, double v);
+void update_mpi(double **C, double **C_old, int n, double h, double u, double v, int nthreads);
 void printToFile(int N, int step, double **A);
 void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int myrank);
 
@@ -143,40 +143,23 @@ int main(int argc, char *argv[]){
     stat = MPI_Cart_shift(cartcomm, 0, 1, &nbrs[0], &nbrs[1]);
     stat = MPI_Cart_shift(cartcomm, 1, 1, &nbrs[2], &nbrs[3]);
 
-    NT = 10;
     c0 = omp_get_wtime();
     // run for NT timesteps
     for (int step=0;step<NT;step++){
-        if (mype == 0){
-            printf("timestep %d\n",step);
-        }
-        if (nprocs == 1) {
-            update(my_C, my_C_old, subgridlen, h, u, v);
-        } else {
-            if (mype == 0){
-                printf("exchanging\n");
-            }
-            exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
-            if (mype == 0){
-                printf("update\n");
-            }
-            update_mpi(my_C, my_C_old, subgridlen, h, u, v, nthreads);
-        }
         std::swap(my_C,my_C_old);
- //       exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
- //       update_mpi(my_C, my_C_old, subgridlen, h, u, v, nthreads);
+        exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
+        update_mpi(my_C, my_C_old, subgridlen, h, u, v, nthreads);
     //    if (step%10 == 0){
     //        printToFile_mpi(step, my_C, N, subgridlen, ngrid, mype);
     //    }
     }
     c1 = omp_get_wtime();
     localtime = c1-c0;
-//    printToFile_mpi(NT, my_C_old, N, subgridlen, ngrid, mype);
     MPI_Reduce(&localtime, &globaltime, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     if (mype==0) {
         printf(" %f\n", globaltime/nprocs);
     }
-    printToFile_mpi(100 + NT, my_C_old, N, subgridlen, ngrid, mype);
+   // printToFile_mpi(NT, my_C, N, subgridlen, ngrid, mype);
     MPI_Barrier(cartcomm);
     MPI_Finalize();
     return 0;
@@ -198,58 +181,58 @@ void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* n
         // blocking send/recv
         if (coords[1] == 0) {
             // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
-            printf("Send right %d to %d\n",mype, nbrs[3]);
+          // printf("Send right %d to %d\n",mype, nbrs[3]);
             MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
-            printf("Receive from left %d from %d\n",mype, nbrs[2]);
+          // printf("Receive from left %d from %d\n",mype, nbrs[2]);
             stat = MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
 
             // SEND LEFT SIDE TO LEFT NEGIHBOR 
-            printf("Send left %d to %d\n",mype, nbrs[2]);
+          // printf("Send left %d to %d\n",mype, nbrs[2]);
             MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
-            printf("Receive from right %d from %d\n",mype, nbrs[3]);
+          // printf("Receive from right %d from %d\n",mype, nbrs[3]);
             stat = MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
         } else {
             // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
-            printf("Receive from left %d from %d\n",mype, nbrs[2]);
+          // printf("Receive from left %d from %d\n",mype, nbrs[2]);
             stat = MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            printf("Send right %d to %d\n",mype, nbrs[3]);
+          // printf("Send right %d to %d\n",mype, nbrs[3]);
             MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
 
             // SEND LEFT SIDE TO LEFT NEGIHBOR 
-            printf("Receive from right %d from %d\n",mype, nbrs[3]);
+          // printf("Receive from right %d from %d\n",mype, nbrs[3]);
             stat = MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            printf("Send left %d to %d\n",mype, nbrs[2]);
+          // printf("Send left %d to %d\n",mype, nbrs[2]);
             MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
         }
         if (coords[0] == 0){
             // SEND TOP TO ABOVE NEIGHBOR
-            printf("Send top %d to %d\n",mype, nbrs[0]);
+          // printf("Send top %d to %d\n",mype, nbrs[0]);
             MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
-            printf("Receive from below %d from %d\n",mype, nbrs[1]);
+          // printf("Receive from below %d from %d\n",mype, nbrs[1]);
             stat = MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
 
             // SEND BOTTOM TO BELOW NEIGHBOR
-            printf("Send bottom %d to %d\n",mype, nbrs[0]);
+          // printf("Send bottom %d to %d\n",mype, nbrs[0]);
             MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
-            printf("Receive from top %d from %d\n",mype, nbrs[0]);
+          // printf("Receive from top %d from %d\n",mype, nbrs[0]);
             stat = MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
         } else {
-            printf("Receive from below %d from %d\n",mype, nbrs[1]);
+          // printf("Receive from below %d from %d\n",mype, nbrs[1]);
             stat = MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            printf("Send top %d to %d\n",mype, nbrs[0]);
+          // printf("Send top %d to %d\n",mype, nbrs[0]);
             MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
 
-            printf("Receive from top %d from %d\n",mype, nbrs[0]);
+          // printf("Receive from top %d from %d\n",mype, nbrs[0]);
             stat = MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            printf("Send bottom %d to %d\n",mype, nbrs[0]);
+          // printf("Send bottom %d to %d\n",mype, nbrs[0]);
             MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
         }
     } else {
@@ -432,7 +415,7 @@ void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int
         for (int row=0; row<N; row++){
             startp = (row/subgridlen)*ngrid;
             endp = startp + ngrid;
-            printf("row %d of %d startp %d endp %d\n",row,N,startp,endp);
+          // printf("row %d of %d startp %d endp %d\n",row,N,startp,endp);
 
             // if startp = 0, print row before receiving from other procs
             // add 1 to startp then? maybe change to send to self also?
