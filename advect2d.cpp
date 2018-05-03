@@ -17,7 +17,7 @@ void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* n
 void printMat(int N, dmatrix& C);
 void copyAtoB(dmatrix& A, dmatrix& B);
 void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v);
-void update_mpi(dmatrix& C, dmatrix& C_old, int n, double h, double u, double v);
+void update_mpi(double **C, double **C_old, int n, double h, double u, double v);
 void printToFile(int N, int step, double **A);
 void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int myrank);
 
@@ -124,17 +124,18 @@ int main(int argc, char *argv[]){
     MPI_Barrier(cartcomm);
 
 
-    NT = 1;
+    NT = 10;
     // run for NT timesteps
     for (int step=0;step<NT;step++){
         exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
         update_mpi(my_C, my_C_old, subgridlen, h, u, v);
-        copyAtoB(my_C,my_C_old);
+        std::swap(my_C,my_C_old);
+    //    copyAtoB(my_C,my_C_old);
     //    if (step%10 == 0){
     //        printToFile_mpi(step, my_C, N, subgridlen, ngrid, mype);
     //    }
     }
-    printToFile_mpi(101, my_C, N, subgridlen, ngrid, mype);
+    printToFile_mpi(100 + NT, my_C_old, N, subgridlen, ngrid, mype);
     MPI_Finalize();
     return 0;
 }
