@@ -10,19 +10,20 @@
 // define new type: matrix of doubles
 typedef std::vector<std::vector<double> > dmatrix ;
 
+double **alloc2darray(int size);
 void init(int N, double dx, dmatrix& C);
-void init_mpi(int N, double dx, dmatrix& C, int subgridlen, int* coords);
-void exchangeGhostCells(dmatrix& my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype, int blockflag);
+void init_mpi(int N, double dx, double **C, int subgridlen, int* coords);
+void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype, int blockflag);
 void printMat(int N, dmatrix& C);
 void copyAtoB(dmatrix& A, dmatrix& B);
 void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v);
 void update_mpi(dmatrix& C, dmatrix& C_old, int n, double h, double u, double v);
-void printToFile(int N, int step, dmatrix& A);
-void printToFile_mpi(int step, dmatrix& C, int N, int subgridlen, int ngrid, int myrank);
+void printToFile(int N, int step, double **A);
+void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int myrank);
 
 int main(int argc, char *argv[]){
     int rflag;
-    rflag = 1;
+    rflag = 0;
     // parameters: read in
     double NT, T, L, u, v, dx, dt, h;
     int N, nthreads, blockflag;
@@ -105,19 +106,23 @@ int main(int argc, char *argv[]){
     // initialize matrix portion on each proc
     // ghost cells included in C, so C is size subgridlen+2 
     // cells "owned" by C are in the interior
-    dmatrix my_C;
-    dmatrix my_C_old;
+    double **my_C;
+    double **my_C_old;
+    my_C = alloc2darray(subgridlen+2);
+    my_C_old = alloc2darray(subgridlen+2);
     init_mpi(N, dx, my_C, subgridlen, coords);
     init_mpi(N, dx, my_C_old, subgridlen, coords);
 
-    printToFile(subgridlen+2, mype, my_C);
-    printToFile_mpi(100, my_C, N, subgridlen, ngrid, mype);
 
     // get neighbors: nbrs: (up,down,left,right)
     int nbrs[4];
     stat = MPI_Cart_shift(cartcomm, 0, 1, &nbrs[0], &nbrs[1]);
     stat = MPI_Cart_shift(cartcomm, 1, 1, &nbrs[2], &nbrs[3]);
    // printf("proc %d, up: %d, down: %d, left: %d, right: %d\n",mype, nbrs[0], nbrs[1], nbrs[2], nbrs[3]);
+
+    printToFile_mpi(100, my_C, N, subgridlen, ngrid, mype);
+    MPI_Barrier(cartcomm);
+
 
     NT = 1;
     // run for NT timesteps
@@ -134,11 +139,11 @@ int main(int argc, char *argv[]){
     return 0;
 }
 
-void exchangeGhostCells(dmatrix& my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype, int blockflag){
+void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype, int blockflag){
     int stat;
     MPI_Status status;
     MPI_Datatype mpi_column;
-    MPI_Type_vector(subgridlen+2, 1, subgridlen+4, MPI_DOUBLE, &mpi_column);
+    MPI_Type_vector(subgridlen+2, 1, subgridlen+2, MPI_DOUBLE, &mpi_column);
     MPI_Type_commit(&mpi_column);
 
     // mpi tags:    23 == left->right
@@ -255,7 +260,7 @@ void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v){
 
 // with mpi, ghost cells included so don't need to do anything about PBC
 // just go from 1 to n instead
-void update_mpi(dmatrix& C, dmatrix& C_old, int n, double h, double u, double v){
+void update_mpi(double **C, double **C_old, int n, double h, double u, double v){
     double temp;
     for (int i=1;i<=n;i++){
         for (int j=1;j<=n;j++){
@@ -284,7 +289,7 @@ void init(int N, double dx, dmatrix& C){
     }
 }
 
-void init_mpi(int N, double dx, dmatrix& C, int sgl, int* coords){
+void init_mpi(int N, double dx, double **C, int sgl, int* coords){
     // sgl == length of each procs grid
     // make C sgl+2 x sgl+2 for ghost cells on all 4 sides, so shift
     // C entries to (1,sgl+1)
@@ -293,7 +298,6 @@ void init_mpi(int N, double dx, dmatrix& C, int sgl, int* coords){
     double x,y;
     xa = (sgl)*coords[0];
     ya = (sgl)*coords[1];
-    C.resize((sgl+2), std::vector<double>((sgl+2)));
     x0 = dx*N/2;
     y0 = x0;
     sigx2 = 0.25*0.25;
@@ -306,6 +310,18 @@ void init_mpi(int N, double dx, dmatrix& C, int sgl, int* coords){
             //C[i+1][j+1] = (i+1)*(-1*j+1);
         }
     }
+}
+
+double **alloc2darray(int size) {
+    double *data = (double *)malloc(size*size*sizeof(double));
+    double **array = (double **)malloc(size*sizeof(double*));
+    for (int i=0;i<size;i++){
+        array[i] = &(data[size*i]);
+        for (int j=0;j<size;j++){
+            array[i][j] = 0.0;
+        }
+    }
+    return array;
 }
 
 // copy values from matrix A to B
@@ -329,7 +345,7 @@ void printMat(int N, dmatrix& C){
     }
 }
 
-void printToFile(int N, int step, dmatrix& A){
+void printToFile(int N, int step, double **A){
     FILE* file;
     char outname [40];
     int n = sprintf(outname, "out-advec-%d.dat", step);
@@ -344,7 +360,7 @@ void printToFile(int N, int step, dmatrix& A){
     return;
 }
 
-void printToFile_mpi(int step, dmatrix& C, int N, int subgridlen, int ngrid, int myrank){
+void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int myrank){
     // proc 0 is "master" to collect and print all info
     if (myrank == 0){
         MPI_Status status;
@@ -361,6 +377,7 @@ void printToFile_mpi(int step, dmatrix& C, int N, int subgridlen, int ngrid, int
         for (int row=0; row<N; row++){
             startp = (row/subgridlen)*ngrid;
             endp = startp + ngrid;
+            printf("row %d of %d startp %d endp %d\n",row,N,startp,endp);
 
             // if startp = 0, print row before receiving from other procs
             // add 1 to startp then? maybe change to send to self also?
