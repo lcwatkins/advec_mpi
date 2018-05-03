@@ -1,4 +1,5 @@
 
+#include <omp.h>
 #include <mpi.h>
 #include <string>
 #include <stdio.h>
@@ -11,12 +12,9 @@
 typedef std::vector<std::vector<double> > dmatrix ;
 
 double **alloc2darray(int size);
-void init(int N, double dx, dmatrix& C);
 void init_mpi(int N, double dx, double **C, int subgridlen, int* coords);
 void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype, int blockflag);
-void printMat(int N, dmatrix& C);
-void copyAtoB(dmatrix& A, dmatrix& B);
-void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v);
+void update(double **C, double **C_old, int N, double h, double u, double v);
 void update_mpi(double **C, double **C_old, int n, double h, double u, double v);
 void printToFile(int N, int step, double **A);
 void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int myrank);
@@ -25,7 +23,7 @@ int main(int argc, char *argv[]){
     int rflag;
     rflag = 0;
     // parameters: read in
-    double NT, T, L, u, v, dx, dt, h;
+    double NT, T, L, u, v, dx, dt, h, c0, c1, localtime, globaltime;
     int N, nthreads, blockflag;
     std::string mpimode;
     if (rflag == 1){
@@ -51,30 +49,17 @@ int main(int argc, char *argv[]){
         nthreads = 1;
         mpimode = "mpi_non_blocking";
     }
-    //printf("N: %d \nNT: %f \nL: %f \nT: %f \nu: %f \nv: %f \n", N, NT, L, T, u, v);
+
     dx = L/N;
     dt = T/NT;
     h = dx/sqrt(2*(u*u+v*v));
     if (dt>h){
         printf("UNSTABLE! h: %f \ndt: %f\n",h,dt);
+        return 1;
     }
     h = dt/(2*dx);
 
-    printf("N: %d, dx: %f\n", N, dx);
-
     // SETUP MPI STUFF
-    if (mpimode.compare("mpi_non_blocking") == 0) {
-        printf("non-blocking mode\n");
-        blockflag = 0;
-    } else if (mpimode.compare("mpi_blocking") == 0){
-        printf("blocking mode\n");
-        blockflag = 1;
-    } else if (mpimode.compare("hybrid") == 0) {
-        printf("hybrid mode\n");
-    } else {
-        printf("non valid MPI mode\n");
-        return 1;
-    }
 
     int nprocs, stat, mype, ngrid, subgridlen;
     MPI_Init(&argc, &argv);
@@ -83,6 +68,45 @@ int main(int argc, char *argv[]){
     stat = MPI_Comm_rank(MPI_COMM_WORLD, &mype);
     assert(stat == MPI_SUCCESS);
     assert(fmod(N, sqrt(nprocs)) == 0);
+
+    if (mpimode.compare("mpi_non_blocking") == 0) {
+        blockflag = 0;
+        if (mype == 0){
+ //           printf("MPI non-blocking mode\n");
+            printf("non-blocking ");           
+            if (nthreads != 1) {
+                printf("Note: reseting to 1 OMP thread\n");
+            }
+        }
+        nthreads = 1;
+    } else if (mpimode.compare("mpi_blocking") == 0){
+        blockflag = 1;
+        if (mype == 0){
+ //           printf("MPI blocking mode\n");
+            printf("blocking     ");           
+            if (nthreads != 1) {
+                printf("Note: reseting to 1 OMP thread\n");
+            }
+        }
+        nthreads = 1;
+    } else if (mpimode.compare("hybrid") == 0) {
+        blockflag = 0;
+        if (mype == 0){
+ //           printf("hybrid mode with %d mpi ranks and %d threads per rank (non-blocking MPI) \n",nprocs, nthreads);
+            printf("hybrid       ");           
+            if (nthreads == 1) {
+                printf("Note: only 1 OMP thread\n");
+            }
+        }
+    } else {
+        printf("non valid MPI mode\n");
+        return 1;
+    }
+
+    if (mype==0){
+ //       printf("N: %d \nNT: %f \nL: %f \nT: %f \nu: %f \nv: %f \n", N, NT, L, T, u, v);
+        printf("%d  %d  ", nprocs, nthreads); 
+    }
 
     // setup cartesian communicator 
     MPI_Comm cartcomm;
@@ -101,7 +125,6 @@ int main(int argc, char *argv[]){
     // get coords of the subgrid on each proc
     int coords[ndim] ;
     stat = MPI_Cart_coords(cartcomm, mype, ndim, coords);
-    printf("%d: (%d,%d)\n",mype,coords[0],coords[1]);
     
     // initialize matrix portion on each proc
     // ghost cells included in C, so C is size subgridlen+2 
@@ -110,32 +133,33 @@ int main(int argc, char *argv[]){
     double **my_C_old;
     my_C = alloc2darray(subgridlen+2);
     my_C_old = alloc2darray(subgridlen+2);
-    init_mpi(N, dx, my_C, subgridlen, coords);
-    init_mpi(N, dx, my_C_old, subgridlen, coords);
-
+    init_mpi(N, dx, my_C, subgridlen, coords, nthreads);
+    init_mpi(N, dx, my_C_old, subgridlen, coords, nthreads);
 
     // get neighbors: nbrs: (up,down,left,right)
     int nbrs[4];
     stat = MPI_Cart_shift(cartcomm, 0, 1, &nbrs[0], &nbrs[1]);
     stat = MPI_Cart_shift(cartcomm, 1, 1, &nbrs[2], &nbrs[3]);
-   // printf("proc %d, up: %d, down: %d, left: %d, right: %d\n",mype, nbrs[0], nbrs[1], nbrs[2], nbrs[3]);
-
-    printToFile_mpi(100, my_C, N, subgridlen, ngrid, mype);
-    MPI_Barrier(cartcomm);
-
 
     NT = 10;
+    c0 = omp_get_wtime();
     // run for NT timesteps
     for (int step=0;step<NT;step++){
         exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
-        update_mpi(my_C, my_C_old, subgridlen, h, u, v);
-        std::swap(my_C,my_C_old);
-    //    copyAtoB(my_C,my_C_old);
+        update_mpi(my_C, my_C_old, subgridlen, h, u, v, nthreads);
     //    if (step%10 == 0){
     //        printToFile_mpi(step, my_C, N, subgridlen, ngrid, mype);
     //    }
+        std::swap(my_C,my_C_old);
+    }
+    c1 = omp_get_wtime();
+    localtime = c1-c0;
+    MPI_Reduce(&localtime, &globaltime, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    if (mype==0) {
+        printf(" %f\n", globaltime/nprocs);
     }
     printToFile_mpi(100 + NT, my_C_old, N, subgridlen, ngrid, mype);
+    MPI_Barrier(cartcomm);
     MPI_Finalize();
     return 0;
 }
@@ -153,67 +177,49 @@ void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* n
     //              10 == down->up
 
     if (blockflag == 1) {
-        printf("BLOCK\n");
         // blocking send/recv
         if (coords[1] == 0) {
             // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
             MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
-            //printf("%d waiting for %d\n",mype,nbrs[2]);
             MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[2]);
 
             // SEND LEFT SIDE TO LEFT NEGIHBOR 
             MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
-            //printf("%d waiting for %d\n",mype,nbrs[3]);
             MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[3]);
         } else {
             // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
-            //printf("%d waiting for %d\n",mype,nbrs[2]);
             MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[2]);
             MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
 
             // SEND LEFT SIDE TO LEFT NEGIHBOR 
-            //printf("%d waiting for %d\n",mype,nbrs[3]);
             MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[3]);
             MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
         }
         if (coords[0] == 0){
             // SEND TOP TO ABOVE NEIGHBOR
             MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
-            //printf("%d waiting for %d\n",mype,nbrs[1]);
             MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[1]);
 
             // SEND BOTTOM TO BELOW NEIGHBOR
             MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
-            //printf("%d waiting for %d\n",mype,nbrs[0]);
             MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[0]);
         } else {
-            //printf("%d waiting for %d\n",mype,nbrs[1]);
             MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[1]);
             MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
 
-            //printf("%d waiting for %d\n",mype,nbrs[0]);
             MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-            //printf("%d received from %d\n",mype,nbrs[1]);
             MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
         }
     } else {
         // non-blocking send/recv
-        printf("NONBLOCK\n");
         MPI_Status status[4*2];
         MPI_Request reqs[4*2];
         MPI_Irecv(&(my_C[0][0]),1,mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &reqs[0]);
@@ -261,12 +267,24 @@ void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v){
 
 // with mpi, ghost cells included so don't need to do anything about PBC
 // just go from 1 to n instead
-void update_mpi(double **C, double **C_old, int n, double h, double u, double v){
+void update_mpi(double **C, double **C_old, int n, double h, double u, double v, int nthreads){
     double temp;
-    for (int i=1;i<=n;i++){
-        for (int j=1;j<=n;j++){
-            temp = 0.25*(C_old[i-1][j] + C_old[i+1][j] + C_old[i][j-1] + C_old[i][j+1]);
-            C[i][j] = temp - h*(u*(C_old[i+1][j]-C_old[i-1][j]) + v*(C_old[i][j+1] - C_old[i][j-1]));
+    int i,j;
+    if (nthreads > 1) {
+#pragma omp parallel for num_threads(nthreads) private(i,j,temp) shared(n,C,C_old) schedule(static)
+        for (i=1;i<=n;i++){
+            for (j=1;j<=n;j++){
+                temp = 0.25*(C_old[i-1][j] + C_old[i+1][j] + C_old[i][j-1] + C_old[i][j+1]);
+                C[i][j] = temp - h*(u*(C_old[i+1][j]-C_old[i-1][j]) + v*(C_old[i][j+1] - C_old[i][j-1]));
+            }
+        }
+
+    } else {
+        for (i=1;i<=n;i++){
+            for (j=1;j<=n;j++){
+                temp = 0.25*(C_old[i-1][j] + C_old[i+1][j] + C_old[i][j-1] + C_old[i][j+1]);
+                C[i][j] = temp - h*(u*(C_old[i+1][j]-C_old[i-1][j]) + v*(C_old[i][j+1] - C_old[i][j-1]));
+            }
         }
     }
     return;
@@ -290,11 +308,11 @@ void init(int N, double dx, dmatrix& C){
     }
 }
 
-void init_mpi(int N, double dx, double **C, int sgl, int* coords){
+void init_mpi(int N, double dx, double **C, int sgl, int* coords, int nthreads){
     // sgl == length of each procs grid
     // make C sgl+2 x sgl+2 for ghost cells on all 4 sides, so shift
     // C entries to (1,sgl+1)
-    int xa,ya;
+    int xa,ya,i,j;
     double x0, y0, sigx2, sigy2;
     double x,y;
     xa = (sgl)*coords[0];
@@ -303,12 +321,24 @@ void init_mpi(int N, double dx, double **C, int sgl, int* coords){
     y0 = x0;
     sigx2 = 0.25*0.25;
     sigy2 = 0.25*0.25;
-    for (int i=0; i<sgl; i++){
-        x = (dx*(xa+i+0.5))-x0;
-        for (int j=0; j<sgl; j++){
-            y = (dx*(ya+j+0.5))-y0;
-            C[i+1][j+1] = exp(-(x*x/(2*sigx2) + y*y/(2*sigy2)));
-            //C[i+1][j+1] = (i+1)*(-1*j+1);
+    if (nthreads > 1) {
+#pragma omp parallel for num_threads(nthreads) private(i,j,x,y) shared(C,sgl,x0,y0,sigx2,sigy2,xa,ya) schedule(static)
+        for (int i=0; i<sgl; i++){
+            x = (dx*(xa+i+0.5))-x0;
+            for (int j=0; j<sgl; j++){
+                y = (dx*(ya+j+0.5))-y0;
+                C[i+1][j+1] = exp(-(x*x/(2*sigx2) + y*y/(2*sigy2)));
+                //C[i+1][j+1] = (i+1)*(-1*j+1);
+            }
+        }
+    } else {
+        for (int i=0; i<sgl; i++){
+            x = (dx*(xa+i+0.5))-x0;
+            for (int j=0; j<sgl; j++){
+                y = (dx*(ya+j+0.5))-y0;
+                C[i+1][j+1] = exp(-(x*x/(2*sigx2) + y*y/(2*sigy2)));
+                //C[i+1][j+1] = (i+1)*(-1*j+1);
+            }
         }
     }
 }
@@ -334,16 +364,6 @@ void copyAtoB(dmatrix& A, dmatrix& B){
         }
     }
     return;
-}
-
-// print out matrix values
-void printMat(int N, dmatrix& C){
-    for (int i=0; i<N; i++){
-        for (int j=0; j<N; j++){
-            printf("%f ",C[i][j]);
-        }
-        printf("\n");
-    }
 }
 
 void printToFile(int N, int step, double **A){
