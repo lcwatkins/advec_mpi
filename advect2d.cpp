@@ -147,8 +147,12 @@ int main(int argc, char *argv[]){
     // run for NT timesteps
     for (int step=0;step<NT;step++){
         std::swap(my_C,my_C_old);
-        exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
-        update_mpi(my_C, my_C_old, subgridlen, h, u, v, nthreads);
+        if (nprocs == 1) {
+            update(my_C, my_C_old, subgridlen, h, u, v);
+        } else {
+            exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
+            update_mpi(my_C, my_C_old, subgridlen, h, u, v, nthreads);
+        }
     //    if (step%10 == 0){
     //        printToFile_mpi(step, my_C, N, subgridlen, ngrid, mype);
     //    }
@@ -159,7 +163,7 @@ int main(int argc, char *argv[]){
     if (mype==0) {
         printf(" %f\n", globaltime/nprocs);
     }
-   // printToFile_mpi(NT, my_C, N, subgridlen, ngrid, mype);
+  //  printToFile_mpi(NT, my_C, N, subgridlen, ngrid, mype);
     MPI_Barrier(cartcomm);
     MPI_Finalize();
     return 0;
@@ -250,23 +254,13 @@ void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* n
         MPI_Isend(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD, &reqs[7]);
 
         MPI_Waitall(8, reqs, status);
-
-//        MPI_Status status[4];
-//        MPI_Request reqs[4];
-//        MPI_Irecv(&(my_C[0][0]),subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &reqs[0]);
-//        MPI_Irecv(&(my_C[subgridlen+1][0]),subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &reqs[1]);
-//
-//        MPI_Isend(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD, &reqs[2]);
-//        MPI_Isend(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD, &reqs[3]);
-//
-//        MPI_Waitall(4, reqs, status);
     }
 
     return;
 }
 
 // using update when nprocs is 1, change to 1...N, not 0...N-1
-void update(dmatrix& C, dmatrix& C_old, int N, double h, double u, double v){
+void update(double **C, double **C_old, int N, double h, double u, double v){
     int l,r,a,b;
     double temp;
     for (int i=1;i<=N;i++){
