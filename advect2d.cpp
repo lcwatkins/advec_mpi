@@ -21,7 +21,7 @@ void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int
 
 int main(int argc, char *argv[]){
     int rflag;
-    rflag = 0;
+    rflag = 1;
     // parameters: read in
     double NT, T, L, u, v, dx, dt, h, c0, c1, localtime, globaltime;
     int N, nthreads, blockflag;
@@ -145,12 +145,12 @@ int main(int argc, char *argv[]){
     c0 = omp_get_wtime();
     // run for NT timesteps
     for (int step=0;step<NT;step++){
+        std::swap(my_C,my_C_old);
         exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
         update_mpi(my_C, my_C_old, subgridlen, h, u, v, nthreads);
     //    if (step%10 == 0){
     //        printToFile_mpi(step, my_C, N, subgridlen, ngrid, mype);
     //    }
-        std::swap(my_C,my_C_old);
     }
     c1 = omp_get_wtime();
     localtime = c1-c0;
@@ -353,17 +353,6 @@ double **alloc2darray(int size) {
         }
     }
     return array;
-}
-
-// copy values from matrix A to B
-void copyAtoB(dmatrix& A, dmatrix& B){
-    int nx = A.size();
-    for (int i=0;i<nx;i++){
-        for (int j=0;j<nx;j++){
-            B[i][j] = A[i][j];
-        }
-    }
-    return;
 }
 
 void printToFile(int N, int step, double **A){
