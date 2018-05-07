@@ -8,9 +8,6 @@
 #include <math.h>
 #include <assert.h>
 
-// define new type: matrix of doubles
-typedef std::vector<std::vector<double> > dmatrix ;
-
 double **alloc2darray(int size);
 void init_mpi(int N, double dx, double **C, int subgridlen, int* coords, int nthreads);
 void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype, int blockflag);
@@ -40,6 +37,7 @@ int main(int argc, char *argv[]){
         nthreads = std::stoi(argv[7]);
         mpimode = argv[8];
     } else {
+        // defaults for when I don't feel like using the command line arguments
         N = 16;
         NT = 20000.0;
         L = 1.0;
@@ -59,7 +57,7 @@ int main(int argc, char *argv[]){
     }
     h = dt/(2*dx);
 
-    // SETUP MPI STUFF
+    ////////////// SETUP MPI STUFF //////////////////
 
     int nprocs, stat, mype, ngrid, subgridlen;
     MPI_Init(&argc, &argv);
@@ -72,7 +70,6 @@ int main(int argc, char *argv[]){
     if (mpimode.compare("mpi_non_blocking") == 0) {
         blockflag = 0;
         if (mype == 0){
- //           printf("MPI non-blocking mode\n");
             printf("non-blocking ");           
             if (nthreads != 1) {
                 printf("Note: reseting to 1 OMP thread\n");
@@ -82,7 +79,6 @@ int main(int argc, char *argv[]){
     } else if (mpimode.compare("mpi_blocking") == 0){
         blockflag = 1;
         if (mype == 0){
- //           printf("MPI blocking mode\n");
             printf("blocking     ");           
             if (nthreads != 1) {
                 printf("Note: reseting to 1 OMP thread\n");
@@ -92,7 +88,6 @@ int main(int argc, char *argv[]){
     } else if (mpimode.compare("hybrid") == 0) {
         blockflag = 0;
         if (mype == 0){
- //           printf("hybrid mode with %d mpi ranks and %d threads per rank (non-blocking MPI) \n",nprocs, nthreads);
             printf("hybrid       ");           
             if (nthreads == 1) {
                 printf("Note: only 1 OMP thread\n");
@@ -126,6 +121,7 @@ int main(int argc, char *argv[]){
     int coords[ndim] ;
     stat = MPI_Cart_coords(cartcomm, mype, ndim, coords);
     
+    ////////////////// INITIALIZE ////////////////////
     // initialize matrix portion on each proc
     // ghost cells included in C, so C is size subgridlen+2 
     // cells "owned" by C are in the interior
@@ -136,39 +132,52 @@ int main(int argc, char *argv[]){
     init_mpi(N, dx, my_C, subgridlen, coords, nthreads);
     init_mpi(N, dx, my_C_old, subgridlen, coords, nthreads);
 
-   // printToFile(subgridlen+2, mype, my_C);
-
-    // get neighbors: nbrs: (up,down,left,right)
+    // get neighbors: nbrs stores numbers of procs on all 4 sides
+    // set up automatically using the cartesian communicator
+    // nbrs: (up,down,left,right)
     int nbrs[4];
     stat = MPI_Cart_shift(cartcomm, 0, 1, &nbrs[0], &nbrs[1]);
     stat = MPI_Cart_shift(cartcomm, 1, 1, &nbrs[2], &nbrs[3]);
 
+    ///////////////////  RUN  /////////////////////
     c0 = omp_get_wtime();
     // run for NT timesteps
     for (int step=0;step<NT;step++){
+        // swap pointers!
         std::swap(my_C,my_C_old);
+
+        // check for nprocs-- if 1, don't try to pass messages (won't work for blocking MPI)
+        // and just use update function from before
+        // otherwise, exchange border cells and then update
         if (nprocs == 1) {
             update(my_C, my_C_old, subgridlen, h, u, v);
         } else {
             exchangeGhostCells(my_C_old, subgridlen, cartcomm, nbrs, coords, mype, blockflag);
             update_mpi(my_C, my_C_old, subgridlen, h, u, v, nthreads);
         }
-    //    if (step%10 == 0){
-    //        printToFile_mpi(step, my_C, N, subgridlen, ngrid, mype);
-    //    }
+
+        // print out if wanted
+        //if (step%10 == 0){
+        //    printToFile_mpi(step, my_C, N, subgridlen, ngrid, mype);
+        //}
     }
     c1 = omp_get_wtime();
     localtime = c1-c0;
+
+    // use MPI reduce to get the runtime from all procs and use the average as
+    // the total run time for this call
     MPI_Reduce(&localtime, &globaltime, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     if (mype==0) {
         printf(" %f\n", globaltime/nprocs);
     }
-  //  printToFile_mpi(NT, my_C, N, subgridlen, ngrid, mype);
+
+    //printToFile_mpi(NT, my_C, N, subgridlen, ngrid, mype);
     MPI_Barrier(cartcomm);
     MPI_Finalize();
     return 0;
 }
 
+// exhange border cells
 void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* nbrs, int* coords, int mype, int blockflag){
     int stat;
     MPI_Status status;
@@ -185,58 +194,42 @@ void exchangeGhostCells(double **my_C, int subgridlen, MPI_Comm cartcomm, int* n
         // blocking send/recv
         if (coords[1] == 0) {
             // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
-          // printf("Send right %d to %d\n",mype, nbrs[3]);
             MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
-          // printf("Receive from left %d from %d\n",mype, nbrs[2]);
             stat = MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
 
             // SEND LEFT SIDE TO LEFT NEGIHBOR 
-          // printf("Send left %d to %d\n",mype, nbrs[2]);
             MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
-          // printf("Receive from right %d from %d\n",mype, nbrs[3]);
             stat = MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
         } else {
             // SEND RIGHT SIDE TO RIGHT NEGIHBOR 
-          // printf("Receive from left %d from %d\n",mype, nbrs[2]);
             stat = MPI_Recv(&(my_C[0][0]), 1, mpi_column, nbrs[2], 23, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-          // printf("Send right %d to %d\n",mype, nbrs[3]);
             MPI_Send(&(my_C[0][subgridlen]), 1, mpi_column, nbrs[3], 23, MPI_COMM_WORLD);
 
             // SEND LEFT SIDE TO LEFT NEGIHBOR 
-          // printf("Receive from right %d from %d\n",mype, nbrs[3]);
             stat = MPI_Recv(&(my_C[0][subgridlen+1]), 1, mpi_column, nbrs[3], 32, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-          // printf("Send left %d to %d\n",mype, nbrs[2]);
             MPI_Send(&(my_C[0][1]), 1, mpi_column, nbrs[2], 32, MPI_COMM_WORLD);
         }
         if (coords[0] == 0){
             // SEND TOP TO ABOVE NEIGHBOR
-          // printf("Send top %d to %d\n",mype, nbrs[0]);
             MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
-          // printf("Receive from below %d from %d\n",mype, nbrs[1]);
             stat = MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
 
             // SEND BOTTOM TO BELOW NEIGHBOR
-          // printf("Send bottom %d to %d\n",mype, nbrs[0]);
             MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
-          // printf("Receive from top %d from %d\n",mype, nbrs[0]);
             stat = MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
         } else {
-          // printf("Receive from below %d from %d\n",mype, nbrs[1]);
             stat = MPI_Recv(&(my_C[subgridlen+1][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 10, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-          // printf("Send top %d to %d\n",mype, nbrs[0]);
             MPI_Send(&(my_C[1][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 10, MPI_COMM_WORLD);
 
-          // printf("Receive from top %d from %d\n",mype, nbrs[0]);
             stat = MPI_Recv(&(my_C[0][0]), subgridlen+2, MPI_DOUBLE, nbrs[0], 01, MPI_COMM_WORLD, &status);
             assert(stat == MPI_SUCCESS);
-          // printf("Send bottom %d to %d\n",mype, nbrs[0]);
             MPI_Send(&(my_C[subgridlen][0]), subgridlen+2, MPI_DOUBLE, nbrs[1], 01, MPI_COMM_WORLD);
         }
     } else {
@@ -312,24 +305,6 @@ void update_mpi(double **C, double **C_old, int n, double h, double u, double v,
     return;
 }
 
-// initialize matrix 
-void init(int N, double dx, dmatrix& C){
-    C.resize(N, std::vector<double>(N));
-    double x0, y0, sigx2, sigy2;
-    double x,y;
-    x0 = dx*N/2;
-    y0 = x0;
-    sigx2 = 0.25*0.25;
-    sigy2 = 0.25*0.25;
-    for (int i=0; i<N; i++){
-        x = (dx*(i+0.5))-x0;
-        for (int j=0; j<N; j++){
-            y = (dx*(j+0.5))-y0;
-            C[i][j] = exp(-(x*x/(2*sigx2) + y*y/(2*sigy2)));
-        }
-    }
-}
-
 void init_mpi(int N, double dx, double **C, int sgl, int* coords, int nthreads){
     // sgl == length of each procs grid
     // make C sgl+2 x sgl+2 for ghost cells on all 4 sides, so shift
@@ -365,6 +340,8 @@ void init_mpi(int N, double dx, double **C, int sgl, int* coords, int nthreads){
     }
 }
 
+// new (compared to ps1) function to allocate a 2d array
+// stored contiguously in memory -- extremely useful for MPI
 double **alloc2darray(int size) {
     double *data = (double *)malloc(size*size*sizeof(double));
     double **array = (double **)malloc(size*sizeof(double*));
@@ -392,6 +369,13 @@ void printToFile(int N, int step, double **A){
     return;
 }
 
+// my function to print out a 2d array distributed across a square ngridxngrid of procs
+// assuming the number of procs increases along the rows first (ie:)
+//  0 1 2
+//  3 4 5
+//  6 7 8 etc.
+//  This is how MPI cartesian communicators are numbered, so this is specific to that case
+//  (and a square number of procs)
 void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int myrank){
     // proc 0 is "master" to collect and print all info
     if (myrank == 0){
@@ -409,7 +393,6 @@ void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int
         for (int row=0; row<N; row++){
             startp = (row/subgridlen)*ngrid;
             endp = startp + ngrid;
-          // printf("row %d of %d startp %d endp %d\n",row,N,startp,endp);
 
             // if startp = 0, print row before receiving from other procs
             // add 1 to startp then? maybe change to send to self also?
@@ -425,8 +408,7 @@ void printToFile_mpi(int step, double **C, int N, int subgridlen, int ngrid, int
                 stat = MPI_Recv(&recvbuf, subgridlen, MPI_DOUBLE, i, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
                 assert(stat == MPI_SUCCESS);
                 for (int j=0; j<subgridlen; j++){
-                    fprintf(file, "%f ", recvbuf[j]);
-                }
+                    fprintf(file, "%f ", recvbuf[j]); }
             }
             fprintf(file, "\n");
         }
